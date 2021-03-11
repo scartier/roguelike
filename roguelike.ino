@@ -76,8 +76,8 @@ struct RoomTemplate
 RoomTemplate roomTemplates[] =
 {
   { RoomConfig_Open,      DC, { {  1,  1 }, { NA, NA }, {  2,  2 } } },
-  { RoomConfig_Corridor0, DC, { {  3,  3 }, { NA, NA }, { NA, NA } } },
-  { RoomConfig_Corridor4, DC, { { NA, NA }, { NA, NA }, {  3,  3 } } },
+  { RoomConfig_Corridor4, DC, { {  3,  3 }, { NA, NA }, { NA, NA } } },
+  { RoomConfig_Corridor0, DC, { { NA, NA }, { NA, NA }, {  3,  3 } } },
   { RoomConfig_Open,      DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
 };
 
@@ -168,6 +168,10 @@ byte playerFace = 0;
 byte playerMoveRate = PLAYER_MOVE_RATE;
 Timer playerMoveTimer;
 
+// State for adjacent tiles
+byte relativeRotation;    // rotation relative to the player tile
+bool tryToMoveHere = false;
+
 // ----------------------------------------------------------------------------------------------------
 // RENDER INFO
 
@@ -212,6 +216,9 @@ void loop()
   updateFaceValues();
 
   render();
+
+  // Consume click if not already done
+  buttonSingleClicked();
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -227,9 +234,6 @@ void loopInit()
       descendLevel();
     }
   }
-
-  // Consume the click if not already done
-  buttonSingleClicked();
 }
 
 // ----------------------------------------------------------------------------------------------------
@@ -265,6 +269,25 @@ void loopPlay()
   {
     playerFace = (playerDir == Direction_CW) ? CW_FROM_FACE(playerFace, 1) : CCW_FROM_FACE(playerFace, 1);
     playerMoveTimer.set(playerMoveRate << 6);
+  }
+
+  if (tileRole == TileRole_Adjacent)
+  {
+    // Clicking an adjacent tile will attempt to move the player there
+    if (buttonSingleClicked() && !hasWoken())
+    {
+      if (currentRoom != null)
+      {
+        if (currentRoom->gameplay.roomConfig == RoomConfig_Open)
+        {
+          tryToMoveHere = true;
+        }
+        else if (currentRoom->gameplay.roomConfig != RoomConfig_Solid)
+        {
+          
+        }
+      }
+    }
   }
 }
 
@@ -302,8 +325,7 @@ void readFaceValues()
 
         // Compute how much this tile is rotated relative to the player tile
         byte entryFace = OPPOSITE_FACE(val.faceValue.fromFace);
-        byte relativeRotation = (f >= entryFace) ? (f - entryFace) : (6 + f - entryFace);
-        val.faceValue.fromFace = relativeRotation;
+        relativeRotation = (f >= entryFace) ? (f - entryFace) : (6 + f - entryFace);
 
         levelRoomData[0] = val;
         currentRoom = &levelRoomData[0];    // non-player tiles use level data [0] to hold room info
@@ -365,7 +387,8 @@ void updateFaceValues()
 // Seed with a starting room. Consider this the first pass. (for reference: ROOM = TILE)
 // Do successive passes through the rooms, processing the rooms added in the previous pass.
 // Each pass looks for rooms with exits and adds new rooms for the next pass.
-// Once the level array is full, change all rooms in the final full pass to be open so that paths don't end in a corridor.
+// Once the level array is full, change all rooms in the final full pass to be open so that paths don't 
+// end in a corridor.
 // Post process all rooms to add items and enemies.
 void generateLevel()
 {
@@ -453,7 +476,7 @@ bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
   // Rotate corridors relative to where we came in
   if (IS_CORRIDOR(roomTemplate->roomConfig))
   {
-    //roomData->levelGen.roomConfig = CW_FROM_FACE(roomData->levelGen.roomConfig, entryFace);
+    roomData->levelGen.roomConfig = CW_FROM_FACE(roomData->levelGen.roomConfig, entryFace);
   }
 
   return true;
@@ -545,7 +568,7 @@ void renderRoom(RoomData *roomData)
   // Factor in our rotation relative to the player tile
   if (tileRole == TileRole_Adjacent)
   {
-    startFace = CW_FROM_FACE(startFace, roomData->faceValue.fromFace);
+    startFace = CW_FROM_FACE(startFace, relativeRotation);
   }
 
   // Draw the room walls and empty spaces
