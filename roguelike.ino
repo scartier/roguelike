@@ -289,6 +289,7 @@ void readFaceValues()
   //
 
   tileRole = TileRole_Init;
+  currentRoom = null;
   FOREACH_FACE(f)
   {
     if (!isValueReceivedOnFaceExpired(f))
@@ -298,6 +299,12 @@ void readFaceValues()
       if (val.faceValue.tileRole == TileRole_Player)
       {
         tileRole = TileRole_Adjacent;
+
+        // Compute how much this tile is rotated relative to the player tile
+        byte entryFace = OPPOSITE_FACE(val.faceValue.fromFace);
+        byte relativeRotation = (f >= entryFace) ? (f - entryFace) : (6 + f - entryFace);
+        val.faceValue.fromFace = relativeRotation;
+
         levelRoomData[0] = val;
         currentRoom = &levelRoomData[0];    // non-player tiles use level data [0] to hold room info
         break;
@@ -337,6 +344,8 @@ void updateFaceValues()
           }
         }
       }
+
+      roomDataOut.faceValue.fromFace = f;
     }
 
     // Set the tile role last because it shares bits with the map coordinates and must overwrite them
@@ -528,12 +537,18 @@ void renderRoom(RoomData *roomData)
       
     default:
       // Corridor - half solid, half open
-      // Factor in the tile rotation
-      startFace = CCW_FROM_FACE(roomData->gameplay.roomConfig, 0);
+      startFace = roomData->gameplay.roomConfig;
       emptyFaces = 3;
       break;
   }
 
+  // Factor in our rotation relative to the player tile
+  if (tileRole == TileRole_Adjacent)
+  {
+    startFace = CW_FROM_FACE(startFace, roomData->faceValue.fromFace);
+  }
+
+  // Draw the room walls and empty spaces
   FOREACH_FACE(f)
   {
     byte face = CW_FROM_FACE(startFace, f);
