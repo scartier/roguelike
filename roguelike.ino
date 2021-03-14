@@ -4,6 +4,7 @@
 #define DC 0  // don't care
 #define NA 0  // not applicable
 #define null 0
+#define INVALID_FACE 7
 
 byte faceOffsetArray[] = { 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5 };
 
@@ -75,7 +76,7 @@ struct RoomTemplate
 
 RoomTemplate roomTemplates[] =
 {
-  { RoomConfig_Open,      DC, { {  1,  1 }, { NA, NA }, {  2,  2 } } },
+  { RoomConfig_Open,      DC, { {  1,  1 }, { NA, NA }, {  3,  3 } } },
   { RoomConfig_Corridor4, DC, { {  3,  3 }, { NA, NA }, { NA, NA } } },
   { RoomConfig_Corridor0, DC, { { NA, NA }, { NA, NA }, {  3,  3 } } },
   { RoomConfig_Open,      DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
@@ -129,10 +130,12 @@ struct RoomDataFaceValue
 {
   byte tileRole   : 2;    // this tile's role - for dynamic tile swapping
   byte fromFace   : 3;    // tells adjacent tile what face of the player tile it's attached to
-  byte UNUSED1    : 3;
+  byte moveHere   : 1;    // flag from adjacent tile to tell player to try to move here
+  byte UNUSED1    : 2;
 
   byte roomConfig : 3;
-  byte UNUSED2    : 4;
+  byte gameState  : 3;
+  byte UNUSED2    : 1;
   byte toggle     : 1;    // toggles every time the data changes
 
   byte enemyType  : 3;
@@ -161,6 +164,7 @@ RoomData *currentRoom = null;
 // ----------------------------------------------------------------------------------------------------
 // GAME STATE
 
+// PLAYER TILE state
 Direction playerDir = Direction_CW;
 byte playerFace = 0;
 
@@ -168,7 +172,11 @@ byte playerFace = 0;
 byte playerMoveRate = PLAYER_MOVE_RATE;
 Timer playerMoveTimer;
 
-// State for adjacent tiles
+byte moveToFace = INVALID_FACE;
+byte toggleMask = 0;
+
+// ADJACENT TILE state
+byte entryFace;           // virtual face the player will enter
 byte relativeRotation;    // rotation relative to the player tile
 bool tryToMoveHere = false;
 
@@ -265,12 +273,33 @@ void startPlay()
 
 void loopPlay()
 {
-  if (playerMoveTimer.isExpired())
+  if (tileRole == TileRole_Player)
   {
-    playerFace = (playerDir == Direction_CW) ? CW_FROM_FACE(playerFace, 1) : CCW_FROM_FACE(playerFace, 1);
-    playerMoveTimer.set(playerMoveRate << 6);
-  }
+    if (playerMoveTimer.isExpired())
+    {
+      playerFace = (playerDir == Direction_CW) ? CW_FROM_FACE(playerFace, 1) : CCW_FROM_FACE(playerFace, 1);
+      playerMoveTimer.set(playerMoveRate << 6);
+    }
 
+    // Move the player to the next room
+    if (currentRoom != null)
+    {
+      if (playerFace == moveToFace)
+      {
+        moveToFace = INVALID_FACE;
+
+        RoomCoord nextRoomCoord = nextCoord(currentRoom->gameplay.coord, playerFace);
+        currentRoom = findRoom(nextRoomCoord);
+
+        playerFace = OPPOSITE_FACE(playerFace);
+        playerMoveTimer.set(playerMoveRate << 6);
+
+        // Force all tiles to update
+        toggleMask = ~toggleMask;
+      }
+    }
+  }
+  
   if (tileRole == TileRole_Adjacent)
   {
     // Clicking an adjacent tile will attempt to move the player there
@@ -280,11 +309,18 @@ void loopPlay()
       {
         if (currentRoom->gameplay.roomConfig == RoomConfig_Open)
         {
-          tryToMoveHere = true;
+          tryToMoveHere = !tryToMoveHere;
         }
         else if (currentRoom->gameplay.roomConfig != RoomConfig_Solid)
         {
-          
+          // Corridor - check if there's a wall blocking movement on this face
+          byte corridorFace1 = currentRoom->gameplay.roomConfig;
+          byte corridorFace2 = CW_FROM_FACE(corridorFace1, 1);
+          byte corridorFace3 = CW_FROM_FACE(corridorFace1, 2);
+          if (entryFace == corridorFace1 || entryFace == corridorFace2 || entryFace == corridorFace3)
+          {
+            tryToMoveHere = !tryToMoveHere;
+          }
         }
       }
     }
@@ -302,7 +338,43 @@ void readFaceValues()
 {
   if (tileRole == TileRole_Player)
   {
-    // Player tile doesn't care what the other tiles have to say
+    // Player tile mostly doesn't care what the other tiles have to say
+    // Exception is movement
+    byte oldMoveToFace = moveToFace;
+    moveToFace = INVALID_FACE;
+    FOREACH_FACE(f)
+    {
+      if (!isValueReceivedOnFaceExpired(f))
+      {
+        RoomData val;
+        val.rawBits = getLastValueReceivedOnFace(f);
+
+        // Ensure the toggle bits match before we consider its data
+        if (val.faceValue.toggle != ((toggleMask >> f) & 0x1))
+        {
+          continue;
+        }
+
+        // Check if the player clicked a new room
+        // Deselect the old by telling the tile to reset itself via the toggle bit
+        if (val.faceValue.moveHere == 1)
+        {
+          moveToFace = f;
+            
+          if (oldMoveToFace == f || oldMoveToFace == INVALID_FACE)
+          {
+            // Same face we saw last time - assume it's the only one and skip
+            continue;
+          }
+
+          // Got here so found a second face with the move flag set
+          // Since it is different from the one last time, assume the player clicked it second and deselect the other(s)
+          toggleMask ^= ~(1 << f);
+          break;
+        }
+      }
+    }
+    
     return;
   }
 
@@ -324,11 +396,19 @@ void readFaceValues()
         tileRole = TileRole_Adjacent;
 
         // Compute how much this tile is rotated relative to the player tile
-        byte entryFace = OPPOSITE_FACE(val.faceValue.fromFace);
+        entryFace = OPPOSITE_FACE(val.faceValue.fromFace);
         relativeRotation = (f >= entryFace) ? (f - entryFace) : (6 + f - entryFace);
+
+        gameState = (GameState) val.faceValue.gameState;
 
         levelRoomData[0] = val;
         currentRoom = &levelRoomData[0];    // non-player tiles use level data [0] to hold room info
+
+        if (val.faceValue.toggle != toggleMask)
+        {
+          resetTileState();
+        }
+        toggleMask = val.faceValue.toggle;
         break;
       }
       else if (val.faceValue.tileRole != TileRole_Init)
@@ -337,6 +417,11 @@ void readFaceValues()
       }
     }
   }
+}
+
+void resetTileState()
+{
+  tryToMoveHere = false;
 }
 
 void updateFaceValues()
@@ -368,11 +453,18 @@ void updateFaceValues()
       }
 
       roomDataOut.faceValue.fromFace = f;
+      roomDataOut.faceValue.gameState = gameState;
+      roomDataOut.faceValue.toggle = (toggleMask >> f) & 0x1;
+    }
+    else if (tileRole == TileRole_Adjacent)
+    {
+      roomDataOut.faceValue.moveHere = tryToMoveHere;
+      roomDataOut.faceValue.toggle = toggleMask;
     }
 
     // Set the tile role last because it shares bits with the map coordinates and must overwrite them
     roomDataOut.faceValue.tileRole = tileRole;
-    
+
     setValueSentOnFace(roomDataOut.rawBits, f);
   }
 }
@@ -576,9 +668,27 @@ void renderRoom(RoomData *roomData)
   {
     byte face = CW_FROM_FACE(startFace, f);
     color.as_uint16 = (f < emptyFaces) ? COLOR_EMPTY : COLOR_WALL;
+    if (tileRole == TileRole_Adjacent)
+    {
+      if (tryToMoveHere)
+      {
+        uint16_t a = (color.as_uint16 << 1) & 0b1111011110111100;
+        color.as_uint16 |= a;//((color.as_uint16 >> 1) & 0b0111101111011110) + 0b01000100010000;
+      }
+    }
     setColorOnFace(color, face);
   }
 
+/*
+  // Highlight the tile that was clicked
+  if (tileRole == TileRole_Adjacent)
+  {
+    if (tryToMoveHere)
+    {
+      setColor(RED);
+    }
+  }
+  */
   // Draw the player above everything else
   if (tileRole == TileRole_Player)
   {
