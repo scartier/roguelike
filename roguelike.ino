@@ -115,8 +115,6 @@ RoomTemplate roomTemplates[] =
 {
   { RoomConfig_Open, MonsterClass_None, DC, { {  1,  1 }, { NA, NA }, {  1,  1 } } },
 
-  { RoomConfig_Open, MonsterClass_EASY, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
-
   // Straight empty corridor
   { RoomConfig_Open, MonsterClass_None, DC, { { NA, NA }, {  2,  2 }, { NA, NA } } },
 
@@ -250,8 +248,8 @@ bool tryToMoveHere = false;
 #define DIM_COLORS 0
 #define RGB_TO_U16_WITH_DIM(r,g,b) ((((uint16_t)(r)>>DIM_COLORS) & 0x1F)<<1 | (((uint16_t)(g)>>DIM_COLORS) & 0x1F)<<6 | (((uint16_t)(b)>>DIM_COLORS) & 0x1F)<<11)
 
-#define COLOR_PLAYER      RGB_TO_U16_WITH_DIM( 24, 24, 24 )
-#define COLOR_WALL        RGB_TO_U16_WITH_DIM( 16,  8,  0 )
+#define COLOR_PLAYER      RGB_TO_U16_WITH_DIM( 31, 31, 31 )
+#define COLOR_WALL        RGB_TO_U16_WITH_DIM( 24, 16,  0 )
 #define COLOR_EMPTY       RGB_TO_U16_WITH_DIM(  6, 12,  0 )
 
 #define COLOR_DANGER      RGB_TO_U16_WITH_DIM( 24,  3,  0 )
@@ -542,7 +540,7 @@ void checkCollisions()
           // Player damages monster!
           pulseReason = PulseReason_MonsterDamaged;
           // Rats only have 1 hp - remove it!
-//          currentRoom->gameplay.monsterType = MonsterType_None;
+          currentRoom->gameplay.monsterType = MonsterType_None;
         }
       }
       break;
@@ -687,11 +685,10 @@ void updateFaceValues()
 
   FOREACH_FACE(f)
   {
-    roomDataOut.faceValue.showPlayer = false;
-
     if (tileRole == TileRole_Player)
     {
       // If we're the player then transmit the adjacent room info
+      bool showPlayer = false;
       if (currentRoom != null)
       {
         if (!isValueReceivedOnFaceExpired(f))
@@ -707,14 +704,17 @@ void updateFaceValues()
           {
             // Room exists - output its info
             roomDataOut.faceValue = nextRoom->faceValue;
+            
+            roomDataOut.faceValue.showPlayer = false;
             if (movingToNewRoom && f == playerFace)
             {
-              roomDataOut.faceValue.showPlayer = true;
+              showPlayer = true;
             }
           }
         }
       }
 
+      roomDataOut.faceValue.showPlayer = showPlayer;
       roomDataOut.faceValue.fromFace = f;
       roomDataOut.faceValue.gameState = gameState;
       roomDataOut.faceValue.toggle = (toggleMask >> f) & 0x1;
