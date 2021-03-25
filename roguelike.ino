@@ -6,6 +6,8 @@
 #define null 0
 #define INVALID_FACE 7
 
+#define MAX(n1,n2)            ((n1) > (n2) ? (n1) : (n2))
+
 byte faceOffsetArray[] = { 0, 1, 2, 3, 4, 5, 0, 1, 2, 3, 4, 5 };
 
 #define CCW_FROM_FACE(f, amt) faceOffsetArray[6 + (f) - (amt)]
@@ -43,24 +45,58 @@ enum Direction
   Direction_CCW
 };
 
+byte randState;
+
 // ----------------------------------------------------------------------------------------------------
 // ROOM CONFIG
-// Defines how a room looks. It can be in one of three states: solid wall, totally empty, or half
-// empty for a corridor. That corridor can be rotated one of six directions.
+// Defines how a room looks. It can either be solid wall or empty.
 
 enum RoomConfig
 {
-  RoomConfig_Corridor0,   // corridor faces 012 relative to Map North
-  RoomConfig_Corridor1,   // corridor faces 123 relative to Map North
-  RoomConfig_Corridor2,   // corridor faces 234 relative to Map North
-  RoomConfig_Corridor3,   // corridor faces 345 relative to Map North
-  RoomConfig_Corridor4,   // corridor faces 450 relative to Map North
-  RoomConfig_Corridor5,   // corridor faces 501 relative to Map North
+  RoomConfig_Corridor0,
+  RoomConfig_Corridor1,
+  RoomConfig_Corridor2,
+  RoomConfig_Corridor3,
+  RoomConfig_Corridor4,
+  RoomConfig_Corridor5,
   RoomConfig_Open,
   RoomConfig_Solid
 };
 
-#define IS_CORRIDOR(x) ((x) <= RoomConfig_Corridor5)
+// ----------------------------------------------------------------------------------------------------
+// MONSTERS
+
+enum MonsterClass
+{
+  MonsterClass_None,
+  MonsterClass_EASY,
+  MonsterClass_MEDIUM,
+  MonsterClass_HARD
+};
+
+enum MonsterType
+{
+  MonsterType_None,
+  MonsterType_Rat           // moves around the tile, switching directions occasionally
+};
+
+//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\
+// RAT
+// Moves around the room slowly, randomly biting
+enum MonsterState_Rat
+{
+  MonsterState_Rat_Walk,
+  MonsterState_Rat_Pause,
+  MonsterState_Rat_Bite
+};
+#define RAT_WALK_RATE   1500
+#define RAT_PAUSE_RATE  2000
+#define RAT_BITE_RATE   1500
+//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\//\\
+
+// Timers for moving monsters in the player tile and adjacent tiles
+Timer monsterMoveTimer;
+Timer adjacentMonsterMoveTimers[FACE_COUNT];
 
 // ----------------------------------------------------------------------------------------------------
 // ROOM TEMPLATE
@@ -70,16 +106,27 @@ enum RoomConfig
 struct RoomTemplate
 {
   byte roomConfig : 3;
-  byte unused : 5;              // padding for byte boundary
+  MonsterClass monsterClass : 2;    // difficulty of possible monster present (0=none)
+  byte unused : 3;              // padding for byte boundary
   byte exitTemplates[3][2];     // three exit faces with choice of two templates each
 };
 
 RoomTemplate roomTemplates[] =
 {
-  { RoomConfig_Open,      DC, { {  1,  1 }, { NA, NA }, {  3,  3 } } },
-  { RoomConfig_Corridor4, DC, { {  3,  3 }, { NA, NA }, { NA, NA } } },
-  { RoomConfig_Corridor0, DC, { { NA, NA }, { NA, NA }, {  3,  3 } } },
-  { RoomConfig_Open,      DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
+  { RoomConfig_Open, MonsterClass_None, DC, { {  1,  1 }, { NA, NA }, {  1,  1 } } },
+
+  { RoomConfig_Open, MonsterClass_EASY, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
+
+  // Straight empty corridor
+  { RoomConfig_Open, MonsterClass_None, DC, { { NA, NA }, {  2,  2 }, { NA, NA } } },
+
+  // Four-chamber room with two exits
+  { RoomConfig_Open, MonsterClass_None, DC, { {  3,  3 }, {  4,  4 }, {  3,  3 } } },
+  { RoomConfig_Open, MonsterClass_EASY, DC, { { NA, NA }, {  5,  5 }, { NA, NA } } },
+  { RoomConfig_Open, MonsterClass_None, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
+
+  // Dead end
+  { RoomConfig_Open, MonsterClass_None, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
 };
 
 // ----------------------------------------------------------------------------------------------------
@@ -100,9 +147,9 @@ struct RoomDataLevelGen
   byte templateIndex : 4;
   byte UNUSED     : 1;
 
-  byte enemyType  : 3;
+  MonsterClass monsterClass  : 3;
   byte entryFace  : 3;
-  byte enemyInfo  : 2;    // enemy-dependent state information
+  byte monsterState : 2;    // monster-dependent state information
 
   byte itemType   : 3;
   byte UNUSED2    : 3;
@@ -117,9 +164,9 @@ struct RoomDataGameplay
   byte UNUSED     : 4;
   byte RESERVED   : 1;    // 'toggle' bit when communicating
 
-  byte enemyType  : 3;
-  byte enemyFace  : 3;    // face location for the enemy
-  byte enemyInfo  : 2;    // enemy-dependent state information
+  MonsterType monsterType  : 3;
+  byte monsterFace  : 3;    // face location for the monster
+  byte monsterState : 2;    // monster-dependent state information
 
   byte itemType   : 3;
   byte itemFace   : 3;    // face location for the item
@@ -129,18 +176,19 @@ struct RoomDataGameplay
 struct RoomDataFaceValue
 {
   byte tileRole   : 2;    // this tile's role - for dynamic tile swapping
-  byte fromFace   : 3;    // tells adjacent tile what face of the player tile it's attached to
-  byte moveHere   : 1;    // flag from adjacent tile to tell player to try to move here
-  byte UNUSED1    : 2;
+  byte fromFace   : 3;    // PLAYER -> ADJACENT: tells adjacent tile what face of the player tile it's attached to
+  byte moveHere   : 1;    // ADJACENT -> PLAYER: flag to tell player to try to move here
+  byte showPlayer : 1;    // PLAYER -> ADJACENT: tells adjacent tile to show the player on its tile before transitioning
+  byte UNUSED1    : 1;
 
   byte roomConfig : 3;
-  byte gameState  : 3;
+  byte gameState  : 3;    // PLAYER -> ADJACENT
   byte UNUSED2    : 1;
   byte toggle     : 1;    // toggles every time the data changes
 
-  byte enemyType  : 3;
-  byte enemyFace  : 3;
-  byte enemyInfo  : 2;
+  MonsterType monsterType  : 3;
+  byte monsterFace  : 3;
+  byte monsterState : 2;
 
   byte itemType   : 3;
   byte itemFace   : 3;
@@ -155,8 +203,8 @@ union RoomData
   uint32_t          rawBits;
 };
 
-#define MAX_ROOMS 10
-RoomData levelRoomData[MAX_ROOMS];
+#define MAX_ROOMS 20
+RoomData levelRoomData[MAX_ROOMS + 1];
 byte maxRoomData = 0;
 
 RoomData *currentRoom = null;
@@ -167,40 +215,69 @@ RoomData *currentRoom = null;
 // PLAYER TILE state
 Direction playerDir = Direction_CW;
 byte playerFace = 0;
+byte playerHitPoints = 3;
+#define BACKGROUND_PULSE_RATE 2000
+Timer backgroundPulseTimer;
+
+enum PulseReason
+{
+  PulseReason_PlayerDamaged,
+  PulseReason_MonsterDamaged
+};
+PulseReason pulseReason;
 
 #define PLAYER_MOVE_RATE (1000 >> 6)
 byte playerMoveRate = PLAYER_MOVE_RATE;
 Timer playerMoveTimer;
+bool canPausePlayerMovement = true;
+bool pausePlayerMovement = false;
 
 byte moveToFace = INVALID_FACE;
+#define MOVE_DELAY 700
+Timer moveDelayTimer;
+bool movingToNewRoom = false;
+
 byte toggleMask = 0;
 
 // ADJACENT TILE state
-byte entryFace;           // virtual face the player will enter
-byte relativeRotation;    // rotation relative to the player tile
+byte entryFace;             // virtual face the player will enter
+byte relativeRotation = 0;  // rotation relative to the player tile
 bool tryToMoveHere = false;
 
 // ----------------------------------------------------------------------------------------------------
 // RENDER INFO
 
 #define DIM_COLORS 0
-#define RGB_TO_U16_WITH_DIM(r,g,b) ((((uint16_t)(r)>>3>>DIM_COLORS) & 0x1F)<<1 | (((uint16_t)(g)>>3>>DIM_COLORS) & 0x1F)<<6 | (((uint16_t)(b)>>3>>DIM_COLORS) & 0x1F)<<11)
+#define RGB_TO_U16_WITH_DIM(r,g,b) ((((uint16_t)(r)>>DIM_COLORS) & 0x1F)<<1 | (((uint16_t)(g)>>DIM_COLORS) & 0x1F)<<6 | (((uint16_t)(b)>>DIM_COLORS) & 0x1F)<<11)
 
-#define COLOR_PLAYER      RGB_TO_U16_WITH_DIM( 192, 192, 192 )
-#define COLOR_WALL        RGB_TO_U16_WITH_DIM( 192,  96,   0 )
-#define COLOR_EMPTY       RGB_TO_U16_WITH_DIM(  48,  96,   0 )
+#define COLOR_PLAYER      RGB_TO_U16_WITH_DIM( 24, 24, 24 )
+#define COLOR_WALL        RGB_TO_U16_WITH_DIM( 16,  8,  0 )
+#define COLOR_EMPTY       RGB_TO_U16_WITH_DIM(  6, 12,  0 )
 
-/*
-uint16_t renderLUT[] =
+#define COLOR_DANGER      RGB_TO_U16_WITH_DIM( 24,  3,  0 )
+#define COLOR_MONSTER_RAT RGB_TO_U16_WITH_DIM(  8, 24, 20 )
+
+// ====================================================================================================
+
+byte __attribute__((noinline)) randGetByte()
 {
-  RGB_TO_U16_WITH_DIM( 255,   0,    0 ),
-  RGB_TO_U16_WITH_DIM(   0, 255,    0 ),
-  RGB_TO_U16_WITH_DIM( 255,   0,  255 )
-};
+  // https://doitwireless.com/2014/06/26/8-bit-pseudo-random-number-generator/
+  byte next = randState >> 1;
+  if (randState & 1)
+  {
+    next ^= 0xB8;
+  }
+  randState = next;
+  return next;
+}
 
-byte colorState[3];           // the current state displayed
-byte overlayState[3];         // used for animations or to hide things
-*/
+byte __attribute__((noinline)) randRange(byte min, byte max)
+{
+  uint32_t val = randGetByte();
+  uint32_t range = max - min;
+  val = (val * range) >> 8;
+  return val + min;
+}
 
 // ====================================================================================================
 
@@ -238,6 +315,9 @@ void loopInit()
   {
     if (buttonSingleClicked() && !hasWoken())
     {
+      // Button clicking provides our entropy for the initial random seed
+      randState = millis();
+      
       tileRole = TileRole_Player;
       descendLevel();
     }
@@ -275,52 +355,229 @@ void loopPlay()
 {
   if (tileRole == TileRole_Player)
   {
-    if (playerMoveTimer.isExpired())
-    {
-      playerFace = (playerDir == Direction_CW) ? CW_FROM_FACE(playerFace, 1) : CCW_FROM_FACE(playerFace, 1);
-      playerMoveTimer.set(playerMoveRate << 6);
-    }
+    loopPlay_Player();
+  }
+  else if (tileRole == TileRole_Adjacent)
+  {
+    loopPlay_Adjacent();
+  }
+}
 
-    // Move the player to the next room
-    if (currentRoom != null)
+void loopPlay_Player()
+{
+  // If in the middle of moving tiles then don't do anything else
+  if (movingToNewRoom && moveDelayTimer.isExpired())
+  {
+    // Delay again once we shift displays so the player has some time to get adjusted
+    moveDelayTimer.set(MOVE_DELAY);
+    movingToNewRoom = false;
+    
+    // Get the room we are moving to
+    RoomCoord nextRoomCoord = nextCoord(currentRoom->gameplay.coord, playerFace);
+    currentRoom = findRoom(nextRoomCoord);
+
+    playerFace = OPPOSITE_FACE(playerFace);
+    playerMoveTimer.set(playerMoveRate << 6);
+
+    // Force all tiles to update
+    toggleMask = ~toggleMask;
+  
+    return;
+  }
+
+  if (!moveDelayTimer.isExpired())
+  {
+    return;
+  }
+  
+  // Holding the button down pauses movement for the player
+  // Long pressing switches directions
+  if (buttonDown())
+  {
+    if (canPausePlayerMovement)
     {
-      if (playerFace == moveToFace)
+      pausePlayerMovement = true;
+      if (buttonLongLongPressed())
       {
-        moveToFace = INVALID_FACE;
-
-        RoomCoord nextRoomCoord = nextCoord(currentRoom->gameplay.coord, playerFace);
-        currentRoom = findRoom(nextRoomCoord);
-
-        playerFace = OPPOSITE_FACE(playerFace);
-        playerMoveTimer.set(playerMoveRate << 6);
-
-        // Force all tiles to update
-        toggleMask = ~toggleMask;
+        canPausePlayerMovement = false;
+        pausePlayerMovement = false;
+        playerDir = (playerDir == Direction_CW) ? Direction_CCW : Direction_CW;
       }
     }
   }
-  
-  if (tileRole == TileRole_Adjacent)
+  else
   {
-    // Clicking an adjacent tile will attempt to move the player there
-    if (buttonSingleClicked() && !hasWoken())
+    pausePlayerMovement = false;
+    canPausePlayerMovement = true;
+  }
+  // Clear bits when not used
+  buttonLongLongPressed();
+
+  // Player automatically moves around the current room
+  if (playerMoveTimer.isExpired() && !pausePlayerMovement)
+  {
+    playerFace = (playerDir == Direction_CW) ? CW_FROM_FACE(playerFace, 1) : CCW_FROM_FACE(playerFace, 1);
+    playerMoveTimer.set(playerMoveRate << 6);
+    checkCollisions();
+  }
+
+  // Move the player to the next room
+  if (currentRoom != null)
+  {
+    if (!movingToNewRoom && playerFace == moveToFace)
     {
-      if (currentRoom != null)
+      movingToNewRoom = true;
+      moveDelayTimer.set(MOVE_DELAY);
+
+      moveToFace = INVALID_FACE;
+
+      // Force the other room to clear its move flag
+      toggleMask ^= 1<<playerFace;
+    }
+  }
+
+  // Move monsters in this room and all adjacent rooms
+  if (currentRoom != null)
+  {
+    loopPlay_MoveMonster(currentRoom, &monsterMoveTimer);
+    
+    FOREACH_FACE(f)
+    {
+      RoomCoord newCoord = nextCoord(currentRoom->gameplay.coord, f);
+      RoomData *nextRoom = findRoom(newCoord);
+      if (nextRoom != null)
       {
-        if (currentRoom->gameplay.roomConfig == RoomConfig_Open)
+        loopPlay_MoveMonster(nextRoom, &adjacentMonsterMoveTimers[f]);
+      }
+    }
+  }
+
+}
+
+void loopPlay_MoveMonster(RoomData *roomData, Timer *moveTimer)
+{
+  switch (roomData->gameplay.monsterType)
+  {
+    case MonsterType_None:  return;
+    case MonsterType_Rat:   moveRat(roomData, moveTimer);
+  }
+
+  if (tileRole == TileRole_Player)
+  {
+    checkCollisions();
+  }
+}
+
+void moveRat(RoomData *roomData, Timer *moveTimer)
+{
+  if (!moveTimer->isExpired())
+  {
+    return;
+  }
+  
+  switch ((MonsterState_Rat) roomData->gameplay.monsterState)
+  {
+    case MonsterState_Rat_Walk:
+      // Use the room x-coordinate to select the rat's walk direction
+      roomData->gameplay.monsterFace =
+        (roomData->gameplay.coord.x & 0x1)
+        ? CW_FROM_FACE(roomData->gameplay.monsterFace, 1)
+        : CCW_FROM_FACE(roomData->gameplay.monsterFace, 1);
+
+      if ((randGetByte() & 0x7) == 0x2)
+      {
+        roomData->gameplay.monsterState = MonsterState_Rat_Pause;
+        moveTimer->set(RAT_PAUSE_RATE);
+      }
+      else
+      {
+        moveTimer->set(RAT_WALK_RATE);
+      }
+      break;
+    
+    case MonsterState_Rat_Pause:
+      roomData->gameplay.monsterState = MonsterState_Rat_Bite;
+      moveTimer->set(RAT_BITE_RATE);
+      break;
+    
+    case MonsterState_Rat_Bite:
+      roomData->gameplay.monsterState = MonsterState_Rat_Walk;
+      moveTimer->set(RAT_WALK_RATE);
+      break;
+  }
+}
+
+void checkCollisions()
+{
+  if (currentRoom == null)
+  {
+    return;
+  }
+
+  if (!backgroundPulseTimer.isExpired())
+  {
+    // Player was already hit recently, don't let them get hit again
+    return;
+  }
+
+//  byte monsterFace = currentRoom->gameplay.monsterFace;
+//  monsterFace = CW_FROM_FACE(monsterFace, relativeRotation);
+  
+  switch (currentRoom->gameplay.monsterType)
+  {
+    case MonsterType_None:
+      return;
+      
+    case MonsterType_Rat:
+      if (playerFace == currentRoom->gameplay.monsterFace)
+      {
+        backgroundPulseTimer.set(BACKGROUND_PULSE_RATE);
+        if ((MonsterState_Rat) currentRoom->gameplay.monsterState == MonsterState_Rat_Bite)
+        {
+          // Player takes damage!
+          pulseReason = PulseReason_PlayerDamaged;
+        }
+        else
+        {
+          // Player damages monster!
+          pulseReason = PulseReason_MonsterDamaged;
+          // Rats only have 1 hp - remove it!
+//          currentRoom->gameplay.monsterType = MonsterType_None;
+        }
+      }
+      break;
+  }
+  
+  if (!backgroundPulseTimer.isExpired())
+  {
+    if (playerHitPoints > 0)
+    {
+      // Player took a hit
+      playerHitPoints--;
+    }
+  }
+}
+
+void loopPlay_Adjacent()
+{
+  // Clicking an adjacent tile will attempt to move the player there
+  if (buttonSingleClicked() && !hasWoken())
+  {
+    if (currentRoom != null)
+    {
+      if (currentRoom->gameplay.roomConfig == RoomConfig_Open)
+      {
+        tryToMoveHere = !tryToMoveHere;
+      }
+      else if (currentRoom->gameplay.roomConfig != RoomConfig_Solid)
+      {
+        // Corridor - check if there's a wall blocking movement on this face
+        byte corridorFace1 = currentRoom->gameplay.roomConfig;
+        byte corridorFace2 = CW_FROM_FACE(corridorFace1, 1);
+        byte corridorFace3 = CW_FROM_FACE(corridorFace1, 2);
+        if (entryFace == corridorFace1 || entryFace == corridorFace2 || entryFace == corridorFace3)
         {
           tryToMoveHere = !tryToMoveHere;
-        }
-        else if (currentRoom->gameplay.roomConfig != RoomConfig_Solid)
-        {
-          // Corridor - check if there's a wall blocking movement on this face
-          byte corridorFace1 = currentRoom->gameplay.roomConfig;
-          byte corridorFace2 = CW_FROM_FACE(corridorFace1, 1);
-          byte corridorFace3 = CW_FROM_FACE(corridorFace1, 2);
-          if (entryFace == corridorFace1 || entryFace == corridorFace2 || entryFace == corridorFace3)
-          {
-            tryToMoveHere = !tryToMoveHere;
-          }
         }
       }
     }
@@ -430,6 +687,8 @@ void updateFaceValues()
 
   FOREACH_FACE(f)
   {
+    roomDataOut.faceValue.showPlayer = false;
+
     if (tileRole == TileRole_Player)
     {
       // If we're the player then transmit the adjacent room info
@@ -448,6 +707,10 @@ void updateFaceValues()
           {
             // Room exists - output its info
             roomDataOut.faceValue = nextRoom->faceValue;
+            if (movingToNewRoom && f == playerFace)
+            {
+              roomDataOut.faceValue.showPlayer = true;
+            }
           }
         }
       }
@@ -481,7 +744,7 @@ void updateFaceValues()
 // Each pass looks for rooms with exits and adds new rooms for the next pass.
 // Once the level array is full, change all rooms in the final full pass to be open so that paths don't 
 // end in a corridor.
-// Post process all rooms to add items and enemies.
+// Post process all rooms to add items and monsters.
 void generateLevel()
 {
   maxRoomData = 0;
@@ -490,10 +753,9 @@ void generateLevel()
 
   byte prevFullPassStartIndex = 0;
   generateRoom({ 7, 1 }, 3, 0);  // {X, Y}, entry face, template index
-/*
+
   while (maxRoomData < MAX_ROOMS)
   {
-*/
     // Loop through all the rooms added in the previous pass
     byte thisPassStartIndex = maxRoomData;
 
@@ -511,7 +773,14 @@ void generateLevel()
           byte newTemplateIndex = roomTemplate->exitTemplates[exitIndex][0];
           
           byte exitFace = CW_FROM_FACE(entryFace, 2 + exitIndex);
+
+          // Skip if the new room would be placed at the edge of the map
           RoomCoord newCoord = nextCoord(prevRoomData->levelGen.coord, exitFace);
+          if (newCoord.x == 0 || newCoord.y == 0 || newCoord.x == 15 || newCoord.y == 15)
+          {
+            continue;
+          }
+          
           byte newEntryFace = OPPOSITE_FACE(exitFace);
           if (!generateRoom(newCoord, newEntryFace, newTemplateIndex))
           {
@@ -520,23 +789,46 @@ void generateLevel()
         }
       }
     }
-/*
+
+    // If we get through a pass without generating any new rooms then we're done
+    if (thisPassStartIndex == maxRoomData)
+    {
+      break;
+    }
   }
-*/
+
+  // All rooms generated - post process to insert items and monsters
+  for (byte roomIndex = 0; roomIndex < maxRoomData; roomIndex++)
+  {
+      RoomData *roomData = &levelRoomData[roomIndex];
+
+      if (roomData->levelGen.monsterClass != MonsterClass_None)
+      {
+        // Overwrite the monster class with the actual monster type
+        roomData->gameplay.monsterType = MonsterType_Rat;
+        roomData->gameplay.monsterFace = 3;
+        roomData->gameplay.monsterState = MonsterState_Rat_Walk;
+      }
+  }
 
   currentRoom = &levelRoomData[0];
 }
 
 bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
 {
+  RoomTemplate *roomTemplate = &roomTemplates[templateIndex];
+
   RoomData *roomData = findRoom(coord);
   if (roomData != null)
   {
     // Tried to generate a room on top of an existing room
-    // Force it to become fully open so it can accommodate all entrances
-    roomData->levelGen.roomConfig = RoomConfig_Open;
+    // Allow it, but take the most advanced enemy/item
 
-    // TODO - superset of enemies & items
+    // Take the worst-case monster class >:O
+    roomData->levelGen.monsterClass = (MonsterClass) MAX(roomData->levelGen.monsterClass, roomTemplate->monsterClass);
+
+    // TODO - superset of items
+    
     return true;
   }
 
@@ -560,16 +852,10 @@ bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
 
   // Copy the template info
   roomData->levelGen.templateIndex = templateIndex;
-  RoomTemplate *roomTemplate = &roomTemplates[templateIndex];
   roomData->levelGen.roomConfig = roomTemplate->roomConfig;
+  roomData->levelGen.monsterClass = roomTemplate->monsterClass;
 
-  // TODO : Add enemies & items
-
-  // Rotate corridors relative to where we came in
-  if (IS_CORRIDOR(roomTemplate->roomConfig))
-  {
-    roomData->levelGen.roomConfig = CW_FROM_FACE(roomData->levelGen.roomConfig, entryFace);
-  }
+  // TODO : Add items
 
   return true;
 }
@@ -668,7 +954,20 @@ void renderRoom(RoomData *roomData)
   {
     byte face = CW_FROM_FACE(startFace, f);
     color.as_uint16 = (f < emptyFaces) ? COLOR_EMPTY : COLOR_WALL;
-    if (tileRole == TileRole_Adjacent)
+    if (tileRole == TileRole_Player)
+    {
+      // If player got hit, flash the background red
+      if (!backgroundPulseTimer.isExpired())
+      {
+        byte pulseIntensity = (backgroundPulseTimer.getRemaining() * 31) / BACKGROUND_PULSE_RATE;
+        switch (pulseReason)
+        {
+          case PulseReason_PlayerDamaged:   color.r |= pulseIntensity; break;
+          case PulseReason_MonsterDamaged:  color.r |= pulseIntensity; color.g |= pulseIntensity; break;
+        }
+      }
+    }
+    else if (tileRole == TileRole_Adjacent)
     {
       if (tryToMoveHere)
       {
@@ -679,6 +978,18 @@ void renderRoom(RoomData *roomData)
     setColorOnFace(color, face);
   }
 
+  // Draw monsters
+  if (roomData->gameplay.roomConfig == RoomConfig_Open)
+  {
+    if (roomData->gameplay.monsterType == MonsterType_Rat)
+    {
+      color.as_uint16 = roomData->gameplay.monsterState == MonsterState_Rat_Bite ? COLOR_DANGER : COLOR_MONSTER_RAT;
+      byte face = roomData->gameplay.monsterFace;
+      face = CW_FROM_FACE(face, relativeRotation);
+      setColorOnFace(color, face);
+    }
+  }
+  
 /*
   // Highlight the tile that was clicked
   if (tileRole == TileRole_Adjacent)
@@ -690,10 +1001,18 @@ void renderRoom(RoomData *roomData)
   }
   */
   // Draw the player above everything else
+  color.as_uint16 = COLOR_PLAYER;
   if (tileRole == TileRole_Player)
   {
-    color.as_uint16 = COLOR_PLAYER;
-    setColorOnFace(color, playerFace);
+    if (!movingToNewRoom)
+    {
+      setColorOnFace(color, playerFace);
+    }
+  }
+  else if (tileRole == TileRole_Adjacent && roomData->faceValue.showPlayer)
+  {
+    byte face = CW_FROM_FACE(entryFace, relativeRotation);
+    setColorOnFace(color, face);
   }
 }
 
@@ -863,6 +1182,3 @@ void render()
   }
 */
 }
-
-// CHANGELIST
-//
