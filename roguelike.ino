@@ -99,6 +99,23 @@ Timer monsterMoveTimer;
 Timer adjacentMonsterMoveTimers[FACE_COUNT];
 
 // ----------------------------------------------------------------------------------------------------
+// ITEMS
+
+enum ItemClass
+{
+  ItemClass_None,
+  ItemClass_Any
+};
+
+enum ItemType
+{
+  ItemType_None,
+  ItemType_Key,
+  ItemType_Door,
+  ItemType_Exit
+};
+
+// ----------------------------------------------------------------------------------------------------
 // ROOM TEMPLATE
 // Used during dungeon generation
 // Describes how rooms are connected together
@@ -107,24 +124,25 @@ struct RoomTemplate
 {
   byte roomConfig : 3;
   MonsterClass monsterClass : 2;    // difficulty of possible monster present (0=none)
-  byte unused : 3;              // padding for byte boundary
+  ItemClass itemClass : 2;          // general type of items that can be here
+  byte unused : 1;              // padding for byte boundary
   byte exitTemplates[3][2];     // three exit faces with choice of two templates each
 };
 
 RoomTemplate roomTemplates[] =
 {
-  { RoomConfig_Open, MonsterClass_None, DC, { {  1,  1 }, { NA, NA }, {  1,  1 } } },
+  { RoomConfig_Open, MonsterClass_None, ItemClass_None, DC, { {  1,  1 }, { NA, NA }, {  1,  1 } } },
 
   // Straight empty corridor
-  { RoomConfig_Open, MonsterClass_None, DC, { { NA, NA }, {  2,  2 }, { NA, NA } } },
+  { RoomConfig_Open, MonsterClass_None, ItemClass_None, DC, { { NA, NA }, {  2,  2 }, { NA, NA } } },
 
   // Four-chamber room with two exits
-  { RoomConfig_Open, MonsterClass_None, DC, { {  3,  3 }, {  4,  4 }, {  3,  3 } } },
-  { RoomConfig_Open, MonsterClass_EASY, DC, { { NA, NA }, {  5,  5 }, { NA, NA } } },
-  { RoomConfig_Open, MonsterClass_None, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
+  { RoomConfig_Open, MonsterClass_None, ItemClass_None, DC, { {  3,  3 }, {  4,  4 }, {  3,  3 } } },
+  { RoomConfig_Open, MonsterClass_EASY, ItemClass_None, DC, { { NA, NA }, {  5,  5 }, { NA, NA } } },
+  { RoomConfig_Open, MonsterClass_None, ItemClass_Any,  DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
 
   // Dead end
-  { RoomConfig_Open, MonsterClass_None, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
+  { RoomConfig_Open, MonsterClass_None, ItemClass_Any, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
 };
 
 // ----------------------------------------------------------------------------------------------------
@@ -143,15 +161,14 @@ struct RoomDataLevelGen
 
   byte roomConfig : 3;
   byte templateIndex : 4;
-  byte UNUSED     : 1;
+  byte keyPath    : 1;            // flag indicating the path where the key should be found
 
   MonsterClass monsterClass  : 3;
   byte entryFace  : 3;
-  byte monsterState : 2;    // monster-dependent state information
+  byte UNUSED1    : 2;
 
-  byte itemType   : 3;
-  byte UNUSED2    : 3;
-  byte itemInfo   : 2;    // item-dependent state information
+  byte UNUSED2    : 5;
+  ItemClass itemClass  : 3;    // make sure this field doesn't clash with 'itemType'
 };
 
 struct RoomDataGameplay
@@ -159,14 +176,15 @@ struct RoomDataGameplay
   RoomCoord coord;
 
   byte roomConfig : 3;
-  byte UNUSED     : 4;
+  byte UNUSED     : 3;
+  byte TMP_KeyPath: 1;
   byte RESERVED   : 1;    // 'toggle' bit when communicating
 
   MonsterType monsterType  : 3;
   byte monsterFace  : 3;    // face location for the monster
   byte monsterState : 2;    // monster-dependent state information
 
-  byte itemType   : 3;
+  ItemType itemType   : 3;
   byte itemFace   : 3;    // face location for the item
   byte itemInfo   : 2;    // item-dependent state information
 };
@@ -181,14 +199,14 @@ struct RoomDataFaceValue
 
   byte roomConfig : 3;
   byte gameState  : 3;    // PLAYER -> ADJACENT
-  byte UNUSED2    : 1;
+  byte TMP_KeyPath: 1;
   byte toggle     : 1;    // toggles every time the data changes
 
   MonsterType monsterType  : 3;
   byte monsterFace  : 3;
   byte monsterState : 2;
 
-  byte itemType   : 3;
+  ItemType itemType   : 3;
   byte itemFace   : 3;
   byte itemInfo   : 2;
 };
@@ -250,10 +268,14 @@ bool tryToMoveHere = false;
 
 #define COLOR_PLAYER      RGB_TO_U16_WITH_DIM( 31, 31, 31 )
 #define COLOR_WALL        RGB_TO_U16_WITH_DIM( 24, 16,  0 )
-#define COLOR_EMPTY       RGB_TO_U16_WITH_DIM(  6, 12,  0 )
+#define COLOR_EMPTY       RGB_TO_U16_WITH_DIM(  6,  9,  0 )
+#define COLOR_EMPTY2      RGB_TO_U16_WITH_DIM(  0,  9, 12 )
+#define COLOR_DOOR        RGB_TO_U16_WITH_DIM(  0, 18, 21 )
+#define COLOR_EXIT        RGB_TO_U16_WITH_DIM(  0, 21,  6 )
+#define COLOR_KEY         RGB_TO_U16_WITH_DIM( 31,  0, 31 )
 
 #define COLOR_DANGER      RGB_TO_U16_WITH_DIM( 24,  3,  0 )
-#define COLOR_MONSTER_RAT RGB_TO_U16_WITH_DIM(  8, 24, 20 )
+#define COLOR_MONSTER_RAT RGB_TO_U16_WITH_DIM( 24, 24,  0 )
 
 // ====================================================================================================
 
@@ -272,7 +294,7 @@ byte __attribute__((noinline)) randGetByte()
 byte __attribute__((noinline)) randRange(byte min, byte max)
 {
   uint32_t val = randGetByte();
-  uint32_t range = max - min;
+  uint32_t range = 1 + max - min;
   val = (val * range) >> 8;
   return val + min;
 }
@@ -287,6 +309,9 @@ void setup()
 
 void loop()
 {
+  // Advance the random number every tick, even if we don't use it
+  randGetByte();
+  
   readFaceValues();
 
   switch (gameState)
@@ -754,6 +779,9 @@ void generateLevel()
   byte prevFullPassStartIndex = 0;
   generateRoom({ 7, 1 }, 3, 0);  // {X, Y}, entry face, template index
 
+  // From the starting room there should be an open path to the key
+  levelRoomData[0].levelGen.keyPath = true;
+
   while (maxRoomData < MAX_ROOMS)
   {
     // Loop through all the rooms added in the previous pass
@@ -765,6 +793,7 @@ void generateLevel()
       RoomTemplate *roomTemplate = &roomTemplates[prevRoomData->levelGen.templateIndex];
       byte entryFace = prevRoomData->levelGen.entryFace;
 
+      byte nextRoomIndex = maxRoomData;   // used to track how many new rooms were added
       for (byte exitIndex = 0; exitIndex <= 2; exitIndex++)
       {
         if (roomTemplate->exitTemplates[exitIndex][0] != NA)
@@ -784,8 +813,20 @@ void generateLevel()
           byte newEntryFace = OPPOSITE_FACE(exitFace);
           if (!generateRoom(newCoord, newEntryFace, newTemplateIndex))
           {
-            // Room was not generated - must have filled the room data array
+            // Room was not generated
+            // Either filled the room data array or encountered a previously-generated room
           }
+        }
+      }
+
+      // Propagate the 'keyPath' flag to one of its exits
+      if (prevRoomData->levelGen.keyPath)
+      {
+        if (maxRoomData > nextRoomIndex)
+        {
+          // Generated at least one exit - choose one to propagate the keyPath
+          byte keyPathIndex = randRange(nextRoomIndex, maxRoomData - 1);
+          levelRoomData[keyPathIndex].levelGen.keyPath = true;
         }
       }
     }
@@ -797,10 +838,63 @@ void generateLevel()
     }
   }
 
+  // ===============================================================
   // All rooms generated - post process to insert items and monsters
+  // This is the process that transforms the 'levelGen' room data into 'gameplay' room data.
+  // Need to make sure we do things in the correct order so that levelGen bits aren't overwritten before they are used.
+
+  // ---------------------------------------------------------------
+  // KEY
+  // The key is placed along the 'keyPath', which are flags for rooms where we guarantee no doors will be placed
+  for (char roomIndex = maxRoomData - 1; roomIndex >= 0; roomIndex--)
+  {
+    RoomData *roomData = &levelRoomData[roomIndex];
+    if (roomData->levelGen.keyPath)
+    {
+      // Place the key and break out - only one key in each level
+      roomData->gameplay.itemType = ItemType_Key;
+      break;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // EXIT
+  // The exit is placed far away from the start and not on the 'keyPath'.
+  // It also must have only a single exit.
+  for (char roomIndex = maxRoomData - 1; roomIndex >= 0; roomIndex--)
+  {
+    RoomData *roomData = &levelRoomData[roomIndex];
+    if (!roomData->levelGen.keyPath && roomData->gameplay.itemType == ItemType_None)
+    {
+      if (numNeighborRooms(roomData) == 1)
+      {
+        // Place the exit
+        roomData->gameplay.itemType = ItemType_Exit;
+
+        // Place the door at the entrance of this room
+        FOREACH_FACE(f)
+        {
+          RoomCoord neighborCoord = nextCoord(roomData->levelGen.coord, f);
+          RoomData *neighborRoom = findRoom(neighborCoord);
+          if (neighborRoom != null)
+          {
+            neighborRoom->gameplay.itemType = ItemType_Door;
+            neighborRoom->gameplay.itemFace = OPPOSITE_FACE(f);
+            break;
+          }
+        }
+
+        // Break out - only one exit and door in each level
+        break;
+      }
+    }
+  }
+
   for (byte roomIndex = 0; roomIndex < maxRoomData; roomIndex++)
   {
       RoomData *roomData = &levelRoomData[roomIndex];
+
+      roomData->gameplay.TMP_KeyPath = roomData->levelGen.keyPath;
 
       if (roomData->levelGen.monsterClass != MonsterClass_None)
       {
@@ -828,8 +922,9 @@ bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
     roomData->levelGen.monsterClass = (MonsterClass) MAX(roomData->levelGen.monsterClass, roomTemplate->monsterClass);
 
     // TODO - superset of items
-    
-    return true;
+
+    // No new room was generated
+    return false;
   }
 
   // Got here so room does not already exist - try to create it
@@ -837,6 +932,7 @@ bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
   // Check if room data array is full
   if (maxRoomData >= MAX_ROOMS)
   {
+    // No new room was generated
     return false;
   }
 
@@ -844,6 +940,9 @@ bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
   roomData = &levelRoomData[maxRoomData];
   maxRoomData++;
 
+  // Zero all bits so that unused fields are clear
+  roomData->rawBits = 0;
+  
   roomData->levelGen.coord = coord;
 
   // Retain the entry face for the next pass
@@ -854,9 +953,9 @@ bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
   roomData->levelGen.templateIndex = templateIndex;
   roomData->levelGen.roomConfig = roomTemplate->roomConfig;
   roomData->levelGen.monsterClass = roomTemplate->monsterClass;
+  roomData->levelGen.itemClass = roomTemplate->itemClass;
 
-  // TODO : Add items
-
+  // New room was generated!
   return true;
 }
 
@@ -916,6 +1015,21 @@ RoomCoord nextCoord(RoomCoord coord, byte exitFace)
   return nextCoord;
 }
 
+byte numNeighborRooms(RoomData *roomData)
+{
+  byte count = 0;
+  FOREACH_FACE(f)
+  {
+    RoomCoord neighborCoord = nextCoord(roomData->levelGen.coord, f);
+    RoomData *neighborRoom = findRoom(neighborCoord);
+    if (neighborRoom != null)
+    {
+      count++;
+    }
+  }
+  return count;
+}
+
 // ====================================================================================================
 
 void renderRoom(RoomData *roomData)
@@ -953,7 +1067,7 @@ void renderRoom(RoomData *roomData)
   FOREACH_FACE(f)
   {
     byte face = CW_FROM_FACE(startFace, f);
-    color.as_uint16 = (f < emptyFaces) ? COLOR_EMPTY : COLOR_WALL;
+    color.as_uint16 = (f < emptyFaces) ? (roomData->gameplay.TMP_KeyPath ? COLOR_EMPTY2 : COLOR_EMPTY) : COLOR_WALL;
     if (tileRole == TileRole_Player)
     {
       // If player got hit, flash the background red
@@ -978,9 +1092,23 @@ void renderRoom(RoomData *roomData)
     setColorOnFace(color, face);
   }
 
-  // Draw monsters
+  // Draw monsters & items
   if (roomData->gameplay.roomConfig == RoomConfig_Open)
   {
+    if (roomData->gameplay.itemType != ItemType_None)
+    {
+      switch (roomData->gameplay.itemType)
+      {
+        case ItemType_Door: color.as_uint16 = COLOR_DOOR; break;
+        case ItemType_Key: color.as_uint16 = COLOR_KEY; break;
+        case ItemType_Exit: color.as_uint16 = COLOR_EXIT; break;
+      }
+      
+      byte face = roomData->gameplay.itemFace;
+      face = CW_FROM_FACE(face, relativeRotation);
+      setColorOnFace(color, face);
+    }
+
     if (roomData->gameplay.monsterType == MonsterType_Rat)
     {
       color.as_uint16 = roomData->gameplay.monsterState == MonsterState_Rat_Bite ? COLOR_DANGER : COLOR_MONSTER_RAT;
@@ -989,17 +1117,7 @@ void renderRoom(RoomData *roomData)
       setColorOnFace(color, face);
     }
   }
-  
-/*
-  // Highlight the tile that was clicked
-  if (tileRole == TileRole_Adjacent)
-  {
-    if (tryToMoveHere)
-    {
-      setColor(RED);
-    }
-  }
-  */
+
   // Draw the player above everything else
   color.as_uint16 = COLOR_PLAYER;
   if (tileRole == TileRole_Player)
