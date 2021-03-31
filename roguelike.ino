@@ -1,6 +1,8 @@
 // 7DRL-like
 // 2021-Feb-23
 
+#define DEBUG_SHOW_KEYPATH 0
+
 #define DC 0  // don't care
 #define NA 0  // not applicable
 #define null 0
@@ -105,7 +107,8 @@ enum ItemType
 {
   ItemType_None,
   ItemType_Key,
-  ItemType_Door,
+  ItemType_LockedDoor,
+  ItemType_OpenDoor,
   ItemType_Exit
 };
 
@@ -187,7 +190,7 @@ struct RoomDataFaceValue
 {
   byte tileRole   : 2;    // this tile's role - for dynamic tile swapping
   byte fromFace   : 3;    // PLAYER -> ADJACENT: tells adjacent tile what face of the player tile it's attached to
-  byte moveHere   : 1;    // ADJACENT -> PLAYER: flag to tell player to try to move here
+  byte moveInfo   : 1;    // PLAYER -> ADJACENT: flag if movement possible, ADJACENT -> PLAYER: flag to tell player to try to move here
   byte showPlayer : 1;    // PLAYER -> ADJACENT: tells adjacent tile to show the player on its tile before transitioning
   byte UNUSED1    : 1;
 
@@ -226,6 +229,7 @@ RoomData *currentRoom = null;
 // PLAYER TILE state
 Direction playerDir = Direction_CW;
 byte playerFace = 0;
+
 byte playerHitPoints = 3;
 #define BACKGROUND_PULSE_RATE 2000
 Timer backgroundPulseTimer;
@@ -248,6 +252,8 @@ byte moveToFace = INVALID_FACE;
 Timer moveDelayTimer;
 bool movingToNewRoom = false;
 
+bool playerHasKey = false;
+
 byte toggleMask = 0;
 
 // ADJACENT TILE state
@@ -264,7 +270,7 @@ bool tryToMoveHere = false;
 #define COLOR_PLAYER      RGB_TO_U16_WITH_DIM( 31, 31, 31 )
 #define COLOR_WALL        RGB_TO_U16_WITH_DIM( 24, 16,  0 )
 #define COLOR_EMPTY       RGB_TO_U16_WITH_DIM(  6,  9,  0 )
-#define COLOR_EMPTY2      RGB_TO_U16_WITH_DIM(  0,  9, 12 )
+#define COLOR_KEYPATH     RGB_TO_U16_WITH_DIM(  0,  6,  9 )
 #define COLOR_DOOR        RGB_TO_U16_WITH_DIM(  0, 18, 21 )
 #define COLOR_EXIT        RGB_TO_U16_WITH_DIM(  0, 21,  6 )
 #define COLOR_KEY         RGB_TO_U16_WITH_DIM( 31,  0, 31 )
@@ -352,7 +358,9 @@ void descendLevel()
   levelNum++;
   generateLevel();
 
+  // Reset some player state for the new level
   playerFace = 0;
+  playerHasKey = false;
 }
 
 void loopDescend()
@@ -532,6 +540,44 @@ void checkCollisions()
     return;
   }
 
+  checkItemCollisions();
+  checkMonsterCollisions();
+}
+
+void checkItemCollisions()
+{
+  // Check if the player stepped on an item
+
+  // If no items in this room then do nothing
+  if (currentRoom->gameplay.itemType == ItemType_None)
+  {
+    return;
+  }
+
+  // If player is not standing on the item then do nothing
+  if (currentRoom->gameplay.itemFace != playerFace)
+  {
+    return;
+  }
+
+  switch (currentRoom->gameplay.itemType)
+  {
+    case ItemType_Key:
+      playerHasKey = true;
+      currentRoom->gameplay.itemType = ItemType_None;
+      break;
+
+    case ItemType_LockedDoor:
+      if (playerHasKey)
+      {
+        currentRoom->gameplay.itemType = ItemType_OpenDoor;
+      }
+      break;
+  }
+}
+
+void checkMonsterCollisions()
+{
   if (!backgroundPulseTimer.isExpired())
   {
     // Player was already hit recently, don't let them get hit again
@@ -583,7 +629,8 @@ void loopPlay_Adjacent()
   {
     if (currentRoom != null)
     {
-      if (currentRoom->gameplay.roomPresent)
+      if (currentRoom->faceValue.roomPresent &&
+          currentRoom->faceValue.moveInfo)
       {
         tryToMoveHere = !tryToMoveHere;
       }
@@ -621,7 +668,7 @@ void readFaceValues()
 
         // Check if the player clicked a new room
         // Deselect the old by telling the tile to reset itself via the toggle bit
-        if (val.faceValue.moveHere == 1)
+        if (val.faceValue.moveInfo == 1)
         {
           moveToFace = f;
             
@@ -713,11 +760,21 @@ void updateFaceValues()
           {
             // Room exists - output its info
             roomDataOut.faceValue = nextRoom->faceValue;
-            
+
+            // Flag if we should temporarily show the player in the adjacent room
             roomDataOut.faceValue.showPlayer = false;
             if (movingToNewRoom && f == playerFace)
             {
               showPlayer = true;
+            }
+
+            // Flag if movement is possible to the adjacent room
+            roomDataOut.faceValue.moveInfo = true;
+            if (currentRoom->gameplay.itemType == ItemType_LockedDoor &&
+                currentRoom->gameplay.itemFace == f)
+            {
+              // Locked door blocks movement
+              roomDataOut.faceValue.moveInfo = false;
             }
           }
         }
@@ -730,7 +787,7 @@ void updateFaceValues()
     }
     else if (tileRole == TileRole_Adjacent)
     {
-      roomDataOut.faceValue.moveHere = tryToMoveHere;
+      roomDataOut.faceValue.moveInfo = tryToMoveHere;
       roomDataOut.faceValue.toggle = toggleMask;
     }
 
@@ -863,7 +920,7 @@ void generateLevel()
           RoomData *neighborRoom = findRoom(neighborCoord);
           if (neighborRoom != null)
           {
-            neighborRoom->gameplay.itemType = ItemType_Door;
+            neighborRoom->gameplay.itemType = ItemType_LockedDoor;
             neighborRoom->gameplay.itemFace = OPPOSITE_FACE(f);
             break;
           }
@@ -1026,7 +1083,12 @@ void renderRoom(RoomData *roomData)
   // Draw the room walls and empty spaces
   FOREACH_FACE(f)
   {
-    color.as_uint16 = (roomData->gameplay.roomPresent) ? (roomData->gameplay.TMP_KeyPath ? COLOR_EMPTY2 : COLOR_EMPTY) : COLOR_WALL;
+#if DEBUG_SHOW_KEYPATH
+    color.as_uint16 = (roomData->gameplay.roomPresent) ? (roomData->gameplay.TMP_KeyPath ? COLOR_KEYPATH : COLOR_EMPTY) : COLOR_WALL;
+#else
+    color.as_uint16 = (roomData->gameplay.roomPresent) ? COLOR_EMPTY : COLOR_WALL;
+#endif
+
     if (tileRole == TileRole_Player)
     {
       // If player got hit, flash the background red
@@ -1059,7 +1121,7 @@ void renderRoom(RoomData *roomData)
     {
       switch (roomData->gameplay.itemType)
       {
-        case ItemType_Door: color.as_uint16 = COLOR_DOOR; break;
+        case ItemType_LockedDoor: color.as_uint16 = COLOR_DOOR; break;
         case ItemType_Key: color.as_uint16 = COLOR_KEY; break;
         case ItemType_Exit: color.as_uint16 = COLOR_EXIT; break;
       }
@@ -1067,6 +1129,19 @@ void renderRoom(RoomData *roomData)
       byte face = roomData->gameplay.itemFace;
       face = CW_FROM_FACE(face, relativeRotation);
       setColorOnFace(color, face);
+
+      // Some items affect other faces
+      if (roomData->gameplay.itemType == ItemType_LockedDoor ||
+          roomData->gameplay.itemType == ItemType_OpenDoor)
+      {
+        // Dim by half
+        color.as_uint16 = COLOR_DOOR >> 1;
+        color.as_uint16 &= 0b0111101111011110;
+        face = CW_FROM_FACE(face, 1);
+        setColorOnFace(color, face);
+        face = CW_FROM_FACE(face, 4);
+        setColorOnFace(color, face);
+      }
     }
 
     if (roomData->gameplay.monsterType == MonsterType_Rat)
