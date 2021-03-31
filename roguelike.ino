@@ -53,12 +53,6 @@ byte randState;
 
 enum RoomConfig
 {
-  RoomConfig_Corridor0,
-  RoomConfig_Corridor1,
-  RoomConfig_Corridor2,
-  RoomConfig_Corridor3,
-  RoomConfig_Corridor4,
-  RoomConfig_Corridor5,
   RoomConfig_Open,
   RoomConfig_Solid
 };
@@ -122,27 +116,26 @@ enum ItemType
 
 struct RoomTemplate
 {
-  byte roomConfig : 3;
   MonsterClass monsterClass : 2;    // difficulty of possible monster present (0=none)
   ItemClass itemClass : 2;          // general type of items that can be here
-  byte unused : 1;              // padding for byte boundary
-  byte exitTemplates[3][2];     // three exit faces with choice of two templates each
+  byte unused : 4;                  // padding for byte boundary
+  byte exitTemplates[3][2];         // three exit faces with choice of two templates each
 };
 
 RoomTemplate roomTemplates[] =
 {
-  { RoomConfig_Open, MonsterClass_None, ItemClass_None, DC, { {  1,  1 }, { NA, NA }, {  1,  1 } } },
+  { MonsterClass_None, ItemClass_None, DC, { {  1,  1 }, { NA, NA }, {  1,  1 } } },
 
   // Straight empty corridor
-  { RoomConfig_Open, MonsterClass_None, ItemClass_None, DC, { { NA, NA }, {  2,  2 }, { NA, NA } } },
+  { MonsterClass_None, ItemClass_None, DC, { { NA, NA }, {  2,  2 }, { NA, NA } } },
 
   // Four-chamber room with two exits
-  { RoomConfig_Open, MonsterClass_None, ItemClass_None, DC, { {  3,  3 }, {  4,  4 }, {  3,  3 } } },
-  { RoomConfig_Open, MonsterClass_EASY, ItemClass_None, DC, { { NA, NA }, {  5,  5 }, { NA, NA } } },
-  { RoomConfig_Open, MonsterClass_None, ItemClass_Any,  DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
+  { MonsterClass_None, ItemClass_None, DC, { {  3,  3 }, {  4,  4 }, {  3,  3 } } },
+  { MonsterClass_EASY, ItemClass_None, DC, { { NA, NA }, {  5,  5 }, { NA, NA } } },
+  { MonsterClass_None, ItemClass_Any,  DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
 
   // Dead end
-  { RoomConfig_Open, MonsterClass_None, ItemClass_Any, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
+  { MonsterClass_None, ItemClass_Any, DC, { { NA, NA }, { NA, NA }, { NA, NA } } },
 };
 
 // ----------------------------------------------------------------------------------------------------
@@ -159,15 +152,16 @@ struct RoomDataLevelGen
 {
   RoomCoord coord;
 
-  byte roomConfig : 3;
+  byte roomPresent: 1;
+  byte UNUSED1    : 2;
   byte templateIndex : 4;
   byte keyPath    : 1;            // flag indicating the path where the key should be found
 
   MonsterClass monsterClass  : 3;
   byte entryFace  : 3;
-  byte UNUSED1    : 2;
+  byte UNUSED2    : 2;
 
-  byte UNUSED2    : 5;
+  byte UNUSED3    : 5;
   ItemClass itemClass  : 3;    // make sure this field doesn't clash with 'itemType'
 };
 
@@ -175,14 +169,14 @@ struct RoomDataGameplay
 {
   RoomCoord coord;
 
-  byte roomConfig : 3;
-  byte UNUSED     : 3;
+  byte roomPresent: 1;
+  byte UNUSED2    : 5;
   byte TMP_KeyPath: 1;
   byte RESERVED   : 1;    // 'toggle' bit when communicating
 
   MonsterType monsterType  : 3;
-  byte monsterFace  : 3;    // face location for the monster
-  byte monsterState : 2;    // monster-dependent state information
+  byte monsterFace  : 3;  // face location for the monster
+  byte monsterState : 2;  // monster-dependent state information
 
   ItemType itemType   : 3;
   byte itemFace   : 3;    // face location for the item
@@ -197,7 +191,8 @@ struct RoomDataFaceValue
   byte showPlayer : 1;    // PLAYER -> ADJACENT: tells adjacent tile to show the player on its tile before transitioning
   byte UNUSED1    : 1;
 
-  byte roomConfig : 3;
+  byte roomPresent: 1;
+  byte UNUSED2    : 2;
   byte gameState  : 3;    // PLAYER -> ADJACENT
   byte TMP_KeyPath: 1;
   byte toggle     : 1;    // toggles every time the data changes
@@ -588,20 +583,9 @@ void loopPlay_Adjacent()
   {
     if (currentRoom != null)
     {
-      if (currentRoom->gameplay.roomConfig == RoomConfig_Open)
+      if (currentRoom->gameplay.roomPresent)
       {
         tryToMoveHere = !tryToMoveHere;
-      }
-      else if (currentRoom->gameplay.roomConfig != RoomConfig_Solid)
-      {
-        // Corridor - check if there's a wall blocking movement on this face
-        byte corridorFace1 = currentRoom->gameplay.roomConfig;
-        byte corridorFace2 = CW_FROM_FACE(corridorFace1, 1);
-        byte corridorFace3 = CW_FROM_FACE(corridorFace1, 2);
-        if (entryFace == corridorFace1 || entryFace == corridorFace2 || entryFace == corridorFace3)
-        {
-          tryToMoveHere = !tryToMoveHere;
-        }
       }
     }
   }
@@ -723,7 +707,7 @@ void updateFaceValues()
           if (nextRoom == null)
           {
             // Non-existent room - output a filled space
-            roomDataOut.faceValue.roomConfig = RoomConfig_Solid;
+            roomDataOut.faceValue.roomPresent = false;
           }
           else
           {
@@ -861,6 +845,7 @@ void generateLevel()
   // EXIT
   // The exit is placed far away from the start and not on the 'keyPath'.
   // It also must have only a single exit.
+  // TODO : Handle corner case when there are no rooms with a single exit!
   for (char roomIndex = maxRoomData - 1; roomIndex >= 0; roomIndex--)
   {
     RoomData *roomData = &levelRoomData[roomIndex];
@@ -942,7 +927,10 @@ bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
 
   // Zero all bits so that unused fields are clear
   roomData->rawBits = 0;
-  
+
+  // Set the bit to say this isn't a solid wall
+  roomData->levelGen.roomPresent = true;
+
   roomData->levelGen.coord = coord;
 
   // Retain the entry face for the next pass
@@ -951,7 +939,6 @@ bool generateRoom(RoomCoord coord, byte entryFace, byte templateIndex)
 
   // Copy the template info
   roomData->levelGen.templateIndex = templateIndex;
-  roomData->levelGen.roomConfig = roomTemplate->roomConfig;
   roomData->levelGen.monsterClass = roomTemplate->monsterClass;
   roomData->levelGen.itemClass = roomTemplate->itemClass;
 
@@ -1036,38 +1023,10 @@ void renderRoom(RoomData *roomData)
 {
   Color color;
 
-  // Assume solid
-  byte startFace = 0;
-  byte emptyFaces = 6;
-
-  switch (roomData->gameplay.roomConfig)
-  {
-    case RoomConfig_Solid:
-      // All walls
-      emptyFaces = 0;
-      break;
-      
-    case RoomConfig_Open:
-      break;
-      
-    default:
-      // Corridor - half solid, half open
-      startFace = roomData->gameplay.roomConfig;
-      emptyFaces = 3;
-      break;
-  }
-
-  // Factor in our rotation relative to the player tile
-  if (tileRole == TileRole_Adjacent)
-  {
-    startFace = CW_FROM_FACE(startFace, relativeRotation);
-  }
-
   // Draw the room walls and empty spaces
   FOREACH_FACE(f)
   {
-    byte face = CW_FROM_FACE(startFace, f);
-    color.as_uint16 = (f < emptyFaces) ? (roomData->gameplay.TMP_KeyPath ? COLOR_EMPTY2 : COLOR_EMPTY) : COLOR_WALL;
+    color.as_uint16 = (roomData->gameplay.roomPresent) ? (roomData->gameplay.TMP_KeyPath ? COLOR_EMPTY2 : COLOR_EMPTY) : COLOR_WALL;
     if (tileRole == TileRole_Player)
     {
       // If player got hit, flash the background red
@@ -1085,15 +1044,16 @@ void renderRoom(RoomData *roomData)
     {
       if (tryToMoveHere)
       {
+        // TODO : Better light up algorithm
         uint16_t a = (color.as_uint16 << 1) & 0b1111011110111100;
         color.as_uint16 |= a;//((color.as_uint16 >> 1) & 0b0111101111011110) + 0b01000100010000;
       }
     }
-    setColorOnFace(color, face);
+    setColorOnFace(color, f);
   }
 
   // Draw monsters & items
-  if (roomData->gameplay.roomConfig == RoomConfig_Open)
+  if (roomData->gameplay.roomPresent)
   {
     if (roomData->gameplay.itemType != ItemType_None)
     {
@@ -1132,145 +1092,6 @@ void renderRoom(RoomData *roomData)
     byte face = CW_FROM_FACE(entryFace, relativeRotation);
     setColorOnFace(color, face);
   }
-}
-
-void renderFace(byte f)
-{
-  /*
-    FaceStateGame *faceStateGame = &faceStatesGame[f];
-
-    byte r = getColorFromState(colorState[0], f);
-    byte g = getColorFromState(colorState[1], f);
-    byte b = getColorFromState(colorState[2], f);
-
-    byte overlayR = getColorFromState(overlayState[0], f);
-    byte overlayG = getColorFromState(overlayState[1], f);
-    byte overlayB = getColorFromState(overlayState[2], f);
-    bool overlayNonZero = overlayR | overlayG | overlayB;
-    bool hasOverlay = (overlayState[0] | overlayState[1] | overlayState[2]) & (1<<f);
-
-    byte colorRGB[3];
-    byte paused = false;
-    bool startNextCommand = faceStateGame->animTimer.isExpired();
-    uint32_t animRate32 = (uint32_t) faceStateGame->animRateDiv4 << 2;
-    uint32_t t = (128 * (animRate32 - faceStateGame->animTimer.getRemaining())) / animRate32;  // 128 = 1.0
-
-    AnimCommand animCommand = animSequences[faceStateGame->animIndexCur];
-    switch (animCommand)
-    {
-    case AnimCommand_SolidBase:
-      colorRGB[0] = r;
-      colorRGB[1] = g;
-      colorRGB[2] = b;
-      startNextCommand = true;
-      break;
-
-    case AnimCommand_SolidOverlay:
-      colorRGB[0] = overlayR;
-      colorRGB[1] = overlayG;
-      colorRGB[2] = overlayB;
-      startNextCommand = true;
-      break;
-
-    case AnimCommand_SolidWithOverlay:
-      colorRGB[0] = hasOverlay ? overlayR : r;
-      colorRGB[1] = hasOverlay ? overlayG : g;
-      colorRGB[2] = hasOverlay ? overlayB : b;
-      startNextCommand = true;
-      break;
-
-    case AnimCommand_LerpOverlayIfNonZeroToBase:
-    case AnimCommand_LerpOverlayToBase:
-      t = 128 - t;
-    case AnimCommand_LerpBaseToOverlayIfNonZero:
-    case AnimCommand_LerpBaseToOverlay:
-      colorRGB[0] = lerpColor(r, overlayR, t);
-      colorRGB[1] = lerpColor(g, overlayG, t);
-      colorRGB[2] = lerpColor(b, overlayB, t);
-
-      if (animCommand == AnimCommand_LerpOverlayIfNonZeroToBase ||
-          animCommand == AnimCommand_LerpBaseToOverlayIfNonZero)
-      {
-        if (!overlayNonZero)
-        {
-          colorRGB[0] = r;
-          colorRGB[1] = g;
-          colorRGB[2] = b;
-        }
-      }
-      break;
-
-    case AnimCommand_Pause:
-    case AnimCommand_PauseHalf:
-      paused = true;
-      break;
-
-    case AnimCommand_FadeInBase:
-      t = 128 - t;
-    case AnimCommand_FadeOutBase:
-      // Force the code below to do the lerp
-      overlayR = 1;
-    case AnimCommand_FadeOutBaseIfOverlayR:
-      colorRGB[0] = colorRGB[1] = colorRGB[2] = 0;
-      if (overlayR)
-      {
-        colorRGB[0] = lerpColor(r, 0, t);
-        colorRGB[1] = lerpColor(g, 0, t);
-        colorRGB[2] = lerpColor(b, 0, t);
-      }
-      break;
-
-    case AnimCommand_RandomRotateBaseAndOverlayR:
-      colorState[0] = randGetByte();
-      colorState[1] = randGetByte();
-      colorState[2] = randGetByte();
-      overlayState[0] = 1 << randRange(0, 6);
-
-      paused = true;
-      startNextCommand = true;
-      break;
-
-    case AnimCommand_RandomToolOnBase:
-      byte randByte = randGetByte() | 0x2;
-      byte toolPattern = (randByte & 0x3E) >> (randByte & 0x1) ;
-      colorState[0] = colorState[1] = colorState[2] = toolPattern;
-
-      paused = true;
-      startNextCommand = true;
-      break;
-    }
-
-    Color color = makeColorRGB(colorRGB[0], colorRGB[1], colorRGB[2]);
-    if (paused)
-    {
-    color.as_uint16 = faceStateGame->savedColor;
-    }
-    faceStateGame->savedColor = color.as_uint16;
-    setColorOnFace(color, f);
-
-    if (startNextCommand)
-    {
-    faceStateGame->animIndexCur++;
-
-    // If we finished the sequence, loop back to the beginning
-    if (animSequences[faceStateGame->animIndexCur] == AnimCommand_Loop)
-    {
-      faceStateGame->animIndexCur = faceStateGame->animIndexStart;
-    }
-    else if (animSequences[faceStateGame->animIndexCur] == AnimCommand_Done)
-    {
-      faceStateGame->animIndexCur--;
-      faceStateGame->animDone = true;
-    }
-
-    // Start timer for next command
-    if (animSequences[faceStateGame->animIndexCur] == AnimCommand_PauseHalf)
-    {
-      animRate32 >>= 1;
-    }
-    faceStateGame->animTimer.set(animRate32);
-    }
-  */
 }
 
 void render()
