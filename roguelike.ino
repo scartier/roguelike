@@ -1,3 +1,4 @@
+  Color color;
 // 7DRL-like
 // 2021-Feb-23
 
@@ -242,6 +243,7 @@ enum PulseReason
 PulseReason pulseReason;
 
 #define PLAYER_MOVE_RATE (1000 >> 6)
+#define LOSE_GAME_FADE_RATE 50
 byte playerMoveRate = PLAYER_MOVE_RATE;
 Timer playerMoveTimer;
 bool canPausePlayerMovement = true;
@@ -253,6 +255,8 @@ Timer moveDelayTimer;
 bool movingToNewRoom = false;
 
 bool playerHasKey = false;
+
+byte millisByte = 0;
 
 byte toggleMask = 0;
 
@@ -268,12 +272,13 @@ bool tryToMoveHere = false;
 #define RGB_TO_U16_WITH_DIM(r,g,b) ((((uint16_t)(r)>>DIM_COLORS) & 0x1F)<<1 | (((uint16_t)(g)>>DIM_COLORS) & 0x1F)<<6 | (((uint16_t)(b)>>DIM_COLORS) & 0x1F)<<11)
 
 #define COLOR_PLAYER      RGB_TO_U16_WITH_DIM( 31, 31, 31 )
-#define COLOR_WALL        RGB_TO_U16_WITH_DIM( 24, 16,  0 )
-#define COLOR_EMPTY       RGB_TO_U16_WITH_DIM(  6,  9,  0 )
+#define COLOR_WALL        RGB_TO_U16_WITH_DIM( 16,  8,  0 )
+#define COLOR_EMPTY       RGB_TO_U16_WITH_DIM(  6, 15,  1 )
 #define COLOR_KEYPATH     RGB_TO_U16_WITH_DIM(  0,  6,  9 )
 #define COLOR_DOOR        RGB_TO_U16_WITH_DIM(  0, 18, 21 )
-#define COLOR_EXIT        RGB_TO_U16_WITH_DIM(  0, 21,  6 )
-#define COLOR_KEY         RGB_TO_U16_WITH_DIM( 31,  0, 31 )
+#define COLOR_EXIT        RGB_TO_U16_WITH_DIM(  6, 15,  1 )
+#define COLOR_KEY1        RGB_TO_U16_WITH_DIM( 31,  0, 31 )
+#define COLOR_KEY2        RGB_TO_U16_WITH_DIM( 24,  0, 24 )
 
 #define COLOR_DANGER      RGB_TO_U16_WITH_DIM( 24,  3,  0 )
 #define COLOR_MONSTER_RAT RGB_TO_U16_WITH_DIM( 24, 24,  0 )
@@ -304,12 +309,15 @@ byte __attribute__((noinline)) randRange(byte min, byte max)
 
 void setup()
 {
+  initGame();
 }
 
 // ----------------------------------------------------------------------------------------------------
 
 void loop()
 {
+  millisByte = millis() >> 5;
+  
   // Advance the random number every tick, even if we don't use it
   randGetByte();
   
@@ -317,25 +325,36 @@ void loop()
 
   switch (gameState)
   {
-    case GameState_Init:    loopInit();    break;
-    case GameState_Descend: loopDescend(); break;
-    case GameState_Play:    loopPlay();    break;
+    case GameState_Init:    loopInit();     break;
+    case GameState_Descend: loopDescend();  break;
+    case GameState_Play:    loopPlay();     break;
+    case GameState_Lose:    loopLose();     break;
+    case GameState_Win:     loopWin();      break;
   }
 
   updateFaceValues();
 
   render();
 
-  // Consume click if not already done
+  // Consume click if not already
   buttonSingleClicked();
 }
 
 // ----------------------------------------------------------------------------------------------------
 // INIT
 
+void initGame()
+{
+  gameState = GameState_Init;
+  currentRoom = null;
+  tileRole = TileRole_Init;
+
+  playerHitPoints = 3;
+}
+
 void loopInit()
 {
-  if (tileRole == TileRole_Init)
+  //if (tileRole == TileRole_Init)
   {
     if (buttonSingleClicked() && !hasWoken())
     {
@@ -478,6 +497,11 @@ void loopPlay_Player()
     }
   }
 
+  // Did the player lose all her hit points?
+  if (playerHitPoints == 0)
+  {
+    loseGame();
+  }
 }
 
 void loopPlay_MoveMonster(RoomData *roomData, Timer *moveTimer)
@@ -573,6 +597,10 @@ void checkItemCollisions()
         currentRoom->gameplay.itemType = ItemType_OpenDoor;
       }
       break;
+
+    case ItemType_Exit:
+      winGame();
+      break;
   }
 }
 
@@ -612,7 +640,7 @@ void checkMonsterCollisions()
       break;
   }
   
-  if (!backgroundPulseTimer.isExpired())
+  if (!backgroundPulseTimer.isExpired() && pulseReason == PulseReason_PlayerDamaged)
   {
     if (playerHitPoints > 0)
     {
@@ -635,6 +663,58 @@ void loopPlay_Adjacent()
         tryToMoveHere = !tryToMoveHere;
       }
     }
+  }
+}
+
+// ----------------------------------------------------------------------------------------------------
+// LOSE
+
+void loseGame()
+{
+  gameState = GameState_Lose;
+
+  // Reuse these for coloring during death
+  playerHitPoints = 31;
+  playerMoveTimer.set(LOSE_GAME_FADE_RATE);
+}
+
+void loopLose()
+{
+  if (playerMoveTimer.isExpired())
+  {
+    playerHitPoints--;
+    if (playerHitPoints < (tileRole == TileRole_Player ? 8 : 1))
+    {
+      initGame();
+      return;
+    }
+    playerMoveTimer.set(LOSE_GAME_FADE_RATE);
+  }
+}
+
+// ----------------------------------------------------------------------------------------------------
+// WIN
+
+void winGame()
+{
+  gameState = GameState_Win;
+
+  // Reuse these for coloring during death
+  playerHitPoints = 31;
+  playerMoveTimer.set(LOSE_GAME_FADE_RATE);
+}
+
+void loopWin()
+{
+  if (playerMoveTimer.isExpired())
+  {
+    playerHitPoints--;
+    if (playerHitPoints < (tileRole == TileRole_Player ? 8 : 1))
+    {
+      initGame();
+      return;
+    }
+    playerMoveTimer.set(LOSE_GAME_FADE_RATE);
   }
 }
 
@@ -710,7 +790,16 @@ void readFaceValues()
         entryFace = OPPOSITE_FACE(val.faceValue.fromFace);
         relativeRotation = (f >= entryFace) ? (f - entryFace) : (6 + f - entryFace);
 
-        gameState = (GameState) val.faceValue.gameState;
+        GameState newGameState = (GameState) val.faceValue.gameState;
+        if (newGameState == GameState_Lose && gameState != GameState_Lose)
+        {
+          loseGame();
+        }
+        if (newGameState == GameState_Win && gameState != GameState_Win)
+        {
+          winGame();
+        }
+        gameState = newGameState;
 
         levelRoomData[0] = val;
         currentRoom = &levelRoomData[0];    // non-player tiles use level data [0] to hold room info
@@ -755,6 +844,9 @@ void updateFaceValues()
           {
             // Non-existent room - output a filled space
             roomDataOut.faceValue.roomPresent = false;
+
+            // This is to tell to render the room, not that we can move into it
+            roomDataOut.faceValue.moveInfo = true;
           }
           else
           {
@@ -773,7 +865,7 @@ void updateFaceValues()
             if (currentRoom->gameplay.itemType == ItemType_LockedDoor &&
                 currentRoom->gameplay.itemFace == f)
             {
-              // Locked door blocks movement
+              // Locked door blocks movement and visibility
               roomDataOut.faceValue.moveInfo = false;
             }
           }
@@ -1104,6 +1196,12 @@ void renderRoom(RoomData *roomData)
     }
     else if (tileRole == TileRole_Adjacent)
     {
+      // Don't display the room if movement is blocked (locked door in the way)
+      if (!roomData->faceValue.moveInfo)
+      {
+        return;
+      }
+      
       if (tryToMoveHere)
       {
         // TODO : Better light up algorithm
@@ -1122,17 +1220,18 @@ void renderRoom(RoomData *roomData)
       switch (roomData->gameplay.itemType)
       {
         case ItemType_LockedDoor: color.as_uint16 = COLOR_DOOR; break;
-        case ItemType_Key: color.as_uint16 = COLOR_KEY; break;
+        case ItemType_Key:
+          color.as_uint16 = (millisByte & 0x1) ? COLOR_KEY1 : COLOR_KEY2;
+          break;
         case ItemType_Exit: color.as_uint16 = COLOR_EXIT; break;
       }
-      
+
       byte face = roomData->gameplay.itemFace;
       face = CW_FROM_FACE(face, relativeRotation);
       setColorOnFace(color, face);
 
       // Some items affect other faces
-      if (roomData->gameplay.itemType == ItemType_LockedDoor ||
-          roomData->gameplay.itemType == ItemType_OpenDoor)
+      if (roomData->gameplay.itemType == ItemType_LockedDoor)
       {
         // Dim by half
         color.as_uint16 = COLOR_DOOR >> 1;
@@ -1141,6 +1240,16 @@ void renderRoom(RoomData *roomData)
         setColorOnFace(color, face);
         face = CW_FROM_FACE(face, 4);
         setColorOnFace(color, face);
+      }
+      else if (roomData->gameplay.itemType == ItemType_Exit)
+      {
+        for (byte i = 0; i < 3; i++)
+        {
+          color.as_uint16 = color.as_uint16 >> 1;
+          color.as_uint16 &= 0b0111101111011110;
+          face = CW_FROM_FACE(face, 1);
+          setColorOnFace(color, face);
+        }
       }
     }
 
@@ -1171,7 +1280,32 @@ void renderRoom(RoomData *roomData)
 
 void render()
 {
+  Color color;
+
   setColor(OFF);
+
+  if (gameState == GameState_Init)
+  {
+    color.as_uint16 = COLOR_WALL;
+    setColor(color);
+    return;
+  }
+  
+  if (gameState == GameState_Lose)
+  {
+    color.r = playerHitPoints;
+    color.g = color.b = 0;
+    setColor(color);
+    return;
+  }
+
+  if (gameState == GameState_Win)
+  {
+    color.g = playerHitPoints;
+    color.r = color.b = 0;
+    setColor(color);
+    return;
+  }
 
   if (currentRoom != null)
   {
